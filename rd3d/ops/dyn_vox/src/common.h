@@ -157,19 +157,19 @@ struct HashTable {
         }
     }
 
-    // __device__ __inline__ val_t lookup(const key_t key) {
-    //     uint32_t slot = key & smax;
-    //     while (true) {
-    //         const uint32_t old = atomicCAS(keys + slot, kEmpty, key);
-    //         if (old == kEmpty) {
-    //             return kEmpty;
-    //         }
-    //         if (old == key) {
-    //             return vals[slot];
-    //         }
-    //         slot = (slot + 1) & smax;
-    //     }
-    // }
+    __device__ __inline__ val_t lookup(const key_t key) {
+        key_t slot = key;
+        while (true) {
+            const uint32_t old = atomicCAS(&data[slot].key, kEmpty, key);
+            if (old == kEmpty) {
+                return kEmpty;
+            }
+            if (old == key) {
+                return data[slot].val;
+            }
+            slot = (slot + 1) & smax;
+        }
+    }
 
     struct KeyValue {
         key_t key;
