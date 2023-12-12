@@ -107,62 +107,76 @@ uint32_t coord_hash_32(const int b, const int x, const int y, const int z) {
 }
 
 
-inline auto get_table_size(int64_t nums, int64_t min = 2048) {
-    auto table_size = nums * 2 > min ? nums * 2 : min;
-    table_size = 2 << ((int64_t) ceilf((logf(static_cast<float>(table_size)) / logf(2.0f))) - 1);
-    return table_size;
-}
 
-template<typename KeyType, typename ValType>
+template<typename val_t>
 struct HashTable {
-    HashTable(KeyType *key_ptr, ValType *val_ptr, uint table_size) :
-            keys(key_ptr), vals(val_ptr), size(table_size), smax(table_size - 1) {};
+    using key_t = uint;
 
-    template<typename F1, typename F2>
-    __device__ __inline__ void insert(const KeyType key, F1 f1, F2 f2) {
-        uint32_t slot = key & smax;
-        while (true) {
-            const uint32_t old = atomicCAS(keys + slot, kEmpty, key);
-            if (old == kEmpty) {
-                f1(vals[slot]);
-                return;
-            }
-            if (old == key) {
-                f2(vals[slot]);
-                return;
-            }
-            slot = (slot + 1) & smax;
-        }
+    explicit HashTable(uint num_elems) : size(suitable_size(num_elems)), smax(size - 1) {};
+
+    inline static uint suitable_size(uint num_elems, uint min_size = 2048) {
+        auto table_size = std::max(2 * num_elems, min_size);
+        return 1u << (uint) (ceilf(log2f((float) table_size)));
     }
+
+    inline void from_blob(void *ptr) {
+        data = (KeyValue *) ptr;
+    }
+
+    inline uint num_bytes() const {
+        return size * sizeof(KeyValue);
+    }
+
+
+    __device__ __inline__
+    uint32_t coord_hash_32(const uint x, const uint y, const uint z) const {
+        uint32_t hash = 2166136261;
+        hash ^= (uint32_t) x;
+        hash *= 16777619;
+        hash ^= (uint32_t) y;
+        hash *= 16777619;
+        hash ^= (uint32_t) z;
+        hash *= 16777619;
+        return hash & smax;
+    }
+
 
     template<typename F1>
-    __device__ __inline__ void insert(const KeyType key, F1 f1) {
-        uint32_t slot = key & smax;
+    __device__ __inline__ key_t insert(const key_t key, F1 f1) {
+        key_t slot = key;
         while (true) {
-            const uint32_t old = atomicCAS(keys + slot, kEmpty, key);
+            const key_t old = atomicCAS(&data[slot].key, kEmpty, key);
             if (old == kEmpty) {
-                f1(vals[slot]);
-                return;
-            }
-            slot = (slot + 1) & smax;
-        }
-    }
-
-    __device__ __inline__ ValType lookup(const KeyType key) {
-        uint32_t slot = key & smax;
-        while (true) {
-            const uint32_t old = atomicCAS(keys + slot, kEmpty, key);
-            if (old == kEmpty) {
-                return kEmpty;
+                f1(data[slot].val);
+                return slot;
             }
             if (old == key) {
-                return vals[slot];
+                return slot;
             }
             slot = (slot + 1) & smax;
         }
     }
 
-    KeyType *const keys;
-    ValType *const vals;
-    const uint size, smax;
+    // __device__ __inline__ val_t lookup(const key_t key) {
+    //     uint32_t slot = key & smax;
+    //     while (true) {
+    //         const uint32_t old = atomicCAS(keys + slot, kEmpty, key);
+    //         if (old == kEmpty) {
+    //             return kEmpty;
+    //         }
+    //         if (old == key) {
+    //             return vals[slot];
+    //         }
+    //         slot = (slot + 1) & smax;
+    //     }
+    // }
+
+    struct KeyValue {
+        key_t key;
+        val_t val;
+    };
+
+    KeyValue *data{nullptr};
+    const uint size{0};
+    const uint smax{0};
 };
