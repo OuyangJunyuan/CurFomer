@@ -11,7 +11,7 @@ void valid_voxel_kernel(const uint32_t N, const uint32_t MAX, const bool *__rest
     auto batch_id = bid[pts_id];
 
     auto v = voxel[batch_id], pt = xyz[pts_id];
-    uint32_t key = coord_hash_32(batch_id, roundf(pt.x / v.x), roundf(pt.y / v.y), roundf(pt.z / v.z));
+    uint32_t key = voxel_hash(batch_id, roundf(pt.x / v.x), roundf(pt.y / v.y), roundf(pt.z / v.z));
     uint32_t slot = key & MAX;
     while (true) {
         uint32_t prev = atomicCAS(table + slot, kEmpty, key);
@@ -46,7 +46,7 @@ void unique_mini_dist_kernel(const uint32_t N, const uint32_t MAX,
     auto dist = d1 * d1 + d2 * d2 + d3 * d3;
 
     // insert to table.
-    uint32_t key = coord_hash_32(batch_id, coord_x, coord_y, coord_z);
+    uint32_t key = voxel_hash(batch_id, coord_x, coord_y, coord_z);
     uint32_t slot = key & MAX;
     while (true) {
         uint32_t prev = atomicCAS(key_table + slot, kEmpty, key);
@@ -215,9 +215,9 @@ void CountNonEmptyVoxel(const uint32_t num_src, const uint32_t num_hash,
     const auto point = sources[num_src * bid + pid];
     const auto table = hash_tables + num_hash * bid;
 
-    const uint32_t hash_key = coord_hash_32((int) roundf(point.x / voxel.x),
-                                            (int) roundf(point.y / voxel.y),
-                                            (int) roundf(point.z / voxel.z));
+    const uint32_t hash_key = voxel_hash((int) roundf(point.x / voxel.x),
+                                         (int) roundf(point.y / voxel.y),
+                                         (int) roundf(point.z / voxel.z));
 
     const uint32_t kHashMax = num_hash - 1;
     uint32_t hash_slot = hash_key & kHashMax;
@@ -294,7 +294,7 @@ void FindMiniDistToCenterForEachNonEmptyVoxels(const uint32_t num_src, const uin
 
     const auto dist_table = dist_tables + num_hash * bid;
     const auto hash_table = hash_tables + num_hash * bid;
-    const uint32_t hash_key = coord_hash_32((int) coord_x, (int) coord_y, (int) coord_z);
+    const uint32_t hash_key = voxel_hash((int) coord_x, (int) coord_y, (int) coord_z);
 
     const uint32_t kHashMax = num_hash - 1;
     uint32_t hash_slot = hash_key & kHashMax;
