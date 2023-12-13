@@ -16,6 +16,8 @@ class DynamicVoxelizationBatch(torch.autograd.Function):
     @staticmethod
     @torch.no_grad()
     def forward(ctx, points_list: List[torch.Tensor], voxel_size, coord_range):
+        for p in points_list:
+            assert p.is_contiguous()
         return dyn_vox_cuda.dynamic_voxelization_batch(points_list, voxel_size, coord_range)
 
 

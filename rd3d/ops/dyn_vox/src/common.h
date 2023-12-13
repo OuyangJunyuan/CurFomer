@@ -7,17 +7,19 @@
 
 
 #define BLOCKS1D(M) dim3(((M)+THREAD_SIZE-1)/THREAD_SIZE)
-#define BLOCKS2D(M, B) dim3((((M)+THREAD_SIZE-1)/THREAD_SIZE),B)
 #define THREADS() dim3(THREAD_SIZE)
 
+
 __device__
-inline static uint32_t voxel_hash(const uint x, const uint y, const uint z) {
+inline static uint32_t voxel_hash(const uint4 coor) {
     uint32_t hash = 2166136261;
-    hash ^= x;
+    hash ^= coor.x;
     hash *= 16777619;
-    hash ^= y;
+    hash ^= coor.y;
     hash *= 16777619;
-    hash ^= z;
+    hash ^= coor.z;
+    hash *= 16777619;
+    hash *= coor.w;
     hash *= 16777619;
     return hash;
 }
@@ -69,9 +71,10 @@ struct HashTable {
         return 1u << (uint) (ceilf(log2f((float) table_size)));
     }
 
-    inline void from_blob(void *ptr) { table = (KeyValue*)ptr; }
+    inline void from_blob(void *ptr) { table = (KeyValue *) ptr; }
 
-    explicit HashTable(uint num_elems) : size(suitable_size(num_elems)), bytes(sizeof(KeyValue) * size) {};
+    explicit HashTable(uint num_elems) :
+            size(suitable_size(num_elems)), bytes(sizeof(KeyValue) * size) {};
 
     struct KeyValue {
         hash_t hash;
