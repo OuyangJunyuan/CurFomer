@@ -17,11 +17,17 @@ struct VoxInfo {
 };
 
 
-__device__ __inline__ uint4 voxelize(const uint bid, const float3 xyz, const VoxInfo vf) {
+__device__ __inline__ uint4 voxelize(const uint bid, const float3 xyz, const VoxInfo &vf) {
     return {bid,
             (uint) floor((xyz.x - vf.coors_min.x) / vf.voxel_size.x),
             (uint) floor((xyz.y - vf.coors_min.y) / vf.voxel_size.y),
             (uint) floor((xyz.z - vf.coors_min.z) / vf.voxel_size.z)};
+}
+
+__device__ __inline__ bool valid(const float3 xyz, const VoxInfo &vf) {
+    return ((vf.coors_min.x <= xyz.x and xyz.x <= vf.coors_max.x) and
+            (vf.coors_min.y <= xyz.y and xyz.y <= vf.coors_max.y) and
+            (vf.coors_min.z <= xyz.z and xyz.z <= vf.coors_max.z));
 }
 
 template<class table_t>
@@ -31,14 +37,15 @@ void voxel_counting_kernel(const uint bid, const PointsInfo pf, const VoxInfo vf
                            uint *__restrict__ count,
                            table_t table) {
     const uint pid = blockDim.x * blockIdx.x + threadIdx.x;
-    if (pid >= pf.num_point) {
-        return;
+    if (pid < pf.num_point) {
+        const float3 xyz = *(float3 *) (points + pf.num_feat * pid);
+        if (valid(xyz, vf)) {
+            const uint key = voxel_hash(voxelize(bid, xyz, vf));
+            table.insert(key, [&](auto &val) {
+                val = atomicAdd(count, 1);
+            });
+        }
     }
-    const float3 xyz = *(float3 *) (points + pf.num_feat * pid);
-    const uint key = voxel_hash(voxelize(bid, xyz, vf));
-    table.insert(key, [&](auto &val) {
-        val = atomicAdd(count, 1);
-    });
 }
 
 template<class table_t>
@@ -49,26 +56,23 @@ void voxel_feats_scatter(const uint bid, const PointsInfo pf, const VoxInfo vf,
                          float *__restrict__ feats,
                          table_t table) {
     const uint pid = blockDim.x * blockIdx.x + threadIdx.x;
-    if (pid >= pf.num_point) {
-        return;
-    }
-    const float3 xyz = *(float3 *) (points + pf.num_feat * pid);
-    if ((xyz.x < vf.coors_min.x or xyz.x >= vf.coors_max.x) or
-        (xyz.y < vf.coors_min.y or xyz.y >= vf.coors_max.y) or
-        (xyz.z < vf.coors_min.z or xyz.z >= vf.coors_max.z)) {
-        return;
-    }
-    const uint4 coor = voxelize(bid, xyz, vf);
-    const auto vid = table.lookup(voxel_hash(coor));
-    if (vid != table_t::EMPTY_HASH) {
-        auto *point = (points + pf.num_feat * pid);
-        auto *const feat = feats + (pf.num_feat + 1) * vid;
-        const auto v_pid = atomicAdd(feat + pf.num_feat, 1.0f);
-        for (int i = 0; i < pf.num_feat; ++i) {
-            atomicAdd(feat + i, point[i]);
-        }
-        if (0 == v_pid) {
-            coors[vid] = coor;
+    if (pid < pf.num_point) {
+        const float3 xyz = *(float3 *) (points + pf.num_feat * pid);
+        if (valid(xyz, vf)) {
+
+            const uint4 coor = voxelize(bid, xyz, vf);
+            const auto vid = table.lookup(voxel_hash(coor));
+            if (vid != table_t::EMPTY_HASH) {
+                auto *const point = (points + pf.num_feat * pid);
+                auto *const feat = feats + (pf.num_feat + 1) * vid;
+                const auto v_pid = atomicAdd(feat + pf.num_feat, 1.0f);
+                for (int i = 0; i < pf.num_feat; ++i) {
+                    atomicAdd(feat + i, point[i]);
+                }
+                if (0 == v_pid) {
+                    coors[vid] = coor;
+                }
+            }
         }
     }
 }
@@ -82,16 +86,20 @@ void feature_normalize_kernel(const uint num_voxel, const uint num_feat,
     }
     auto *const feat = feats + (num_feat + 1) * vid;
     const float v_num_point = feat[num_feat];
+    if (v_num_point < 0.5) {
+        return;
+    }
     for (int i = 0; i < num_feat; ++i) {
         feat[i] /= v_num_point;
     }
 }
 
 
-std::vector<at::Tensor> DynamicVoxelizationWrapper(const at::Tensor &points,
-                                                   const std::vector<float> &voxel_size,
-                                                   const std::vector<float> &coor_range,
-                                                   uint batch_id) {
+std::tuple<at::Tensor, at::Tensor, at::Tensor>
+DynamicVoxelizationWrapper(const at::Tensor &points,
+                           const std::vector<float> &voxel_size,
+                           const std::vector<float> &coor_range,
+                           uint batch_id) {
 
     const uint num_point = points.size(0);
     const uint num_feat = points.size(1);
@@ -107,28 +115,32 @@ std::vector<at::Tensor> DynamicVoxelizationWrapper(const at::Tensor &points,
     auto table_data = points.new_full({table.bytes}, -1, torch::ScalarType::Char);
     table.from_blob(table_data.data_ptr());
 
-    const auto grid = BLOCKS1D(num_point);
-    const auto block = THREADS();
-    voxel_counting_kernel<<<grid, block>>>((uint) batch_id, pf, vf,
-                                           (float *) points.data_ptr(),
-                                           (uint *) count.data_ptr(),
-                                           table);
+    voxel_counting_kernel<<<BLOCKS1D(num_point), THREADS()>>>(
+            (uint) batch_id, pf, vf,
+            (float *) points.data_ptr(),
+            (uint *) count.data_ptr(),
+            table
+    );
     auto num_voxel = count.item<int>();
     auto coors = points.new_empty({num_voxel, 4}, torch::ScalarType::Int);
     auto feats = points.new_zeros({num_voxel, num_feat + 1}, torch::ScalarType::Float);
-    voxel_feats_scatter<<<grid, block>>>(
+    voxel_feats_scatter<<<BLOCKS1D(num_point), THREADS()>>>(
             (uint) batch_id, pf, vf,
             (float *) points.data_ptr(),
             (uint4 *) coors.data_ptr(),
             (float *) feats.data_ptr(),
             table
     );
+    feature_normalize_kernel<<<BLOCKS1D(num_voxel), THREADS()>>>(
+            num_voxel, num_feat, (float *) feats.data_ptr()
+    );
     return {coors, feats, count};
 }
 
-std::vector<at::Tensor> DynamicVoxelizationBatchWrapper(const std::vector<at::Tensor> &points_list,
-                                                        const std::vector<float> &voxel_size,
-                                                        const std::vector<float> &coor_range) {
+std::tuple<at::Tensor, at::Tensor, at::Tensor>
+DynamicVoxelizationBatchWrapper(const std::vector<at::Tensor> &points_list,
+                                const std::vector<float> &voxel_size,
+                                const std::vector<float> &coor_range) {
     const uint num_batch = points_list.size();
     const auto &points_0 = points_list[0];
     if (num_batch == 1) {
@@ -169,7 +181,7 @@ std::vector<at::Tensor> DynamicVoxelizationBatchWrapper(const std::vector<at::Te
     const uint num_voxel = cum_num_voxel[num_batch];
     auto coors = points_0.new_empty({num_voxel, 4}, torch::ScalarType::Int);
     auto feats = points_0.new_zeros({num_voxel, num_feat + 1}, torch::ScalarType::Float);
-    for (int bid = 0; bid < num_batch; ++bid) {
+    for (uint bid = 0; bid < num_batch; ++bid) {
         const uint num_point = points_list[bid].size(0);
         PointsInfo pf{num_point, num_feat};
         voxel_feats_scatter<<<BLOCKS1D(num_point), THREADS()>>>(
@@ -185,5 +197,4 @@ std::vector<at::Tensor> DynamicVoxelizationBatchWrapper(const std::vector<at::Te
     );
     return {coors, feats, counts};
 }
-
 
