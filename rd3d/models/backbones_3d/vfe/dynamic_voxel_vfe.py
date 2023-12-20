@@ -95,9 +95,9 @@ class DynamicVoxelVFE(VFETemplate):
 
         # generate voxel coordinates
         unq_coords = unq_coords
-        voxel_coords = torch.stack((unq_coords // self.scale_xyz,
-                                    (unq_coords % self.scale_xyz) // self.scale_yz,
-                                    (unq_coords % self.scale_yz) // self.scale_z,
+        voxel_coords = torch.stack((torch.div(unq_coords, self.scale_xyz, rounding_mode='trunc'),
+                                    torch.div((unq_coords % self.scale_xyz), self.scale_yz, rounding_mode='trunc'),
+                                    torch.div(unq_coords % self.scale_yz, self.scale_z, rounding_mode='trunc'),
                                     unq_coords % self.scale_z), dim=1).int()
         # voxel_coords = voxel_coords[:, [0, 3, 2, 1]]
 
