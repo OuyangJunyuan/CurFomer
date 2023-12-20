@@ -118,11 +118,9 @@ class PointSegmentor(torch.nn.Module):
             onehot *= centerness.view(-1, 1)
 
         cls_loss = self.loss_func(cls_logits, onehot[:, 1:], weights=cls_weights)
-        cls_loss = self.model_cfg.LOSS.WEIGHT * cls_loss.sum()
-        assert not torch.isnan(cls_logits).any(), torch.isnan(cls_logits).sum()
-        assert not torch.isinf(cls_logits).any(), torch.isinf(cls_logits).sum()
-        assert not torch.isnan(cls_loss).any(), torch.isnan(cls_loss).sum()
-        assert not torch.isinf(cls_loss).any(), torch.isinf(cls_loss).sum()
+        cls_loss = self.model_cfg.LOSS.WEIGHT * cls_loss.sum()  # .mean(dim=-1).sum()
+        assert not (torch.isnan(cls_loss).any() or torch.isinf(cls_loss).any())
+        assert not (torch.isnan(cls_logits).any() or torch.isinf(cls_logits).any())
 
         if 'LOG_NAME' in self.model_cfg.LOSS:
             tb_dict.update({self.model_cfg.LOSS.LOG_NAME: cls_loss.item()})
