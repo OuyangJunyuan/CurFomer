@@ -1,6 +1,8 @@
 /model_zoo/
 /output/
 /data/
+/build/
 **/.idea/
 **/cmake-build-debug
 **/cmake-build-release
+**/**.so
