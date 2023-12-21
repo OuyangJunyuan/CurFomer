@@ -361,8 +361,7 @@ class CenterAwareSampling(PS):
 
         positives, negatives = point_cls_labels > 0, point_cls_labels == 0
         cls_weights = positives * 1.0 + negatives * 1.0
-        pos_normalizer = cls_weights.sum(dim=0).float()
-        cls_weights /= torch.clamp(pos_normalizer, min=1.0)
+        cls_weights /= torch.clamp(positives.sum(dim=0).float(), min=1.0)
 
         one_hot_targets = point_cls_preds.new_zeros(*list(point_cls_labels.shape), self.output_channels + 1)
         one_hot_targets.scatter_(value=1.0, dim=-1,

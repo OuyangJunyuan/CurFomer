@@ -55,12 +55,11 @@ class PointSegmentor(torch.nn.Module):
 
             if self.model_cfg.TARGET.get('EXTRA_WIDTH', False):
                 this_enlarged_boxes = box_utils.enlarge_box3d(this_boxes, self.model_cfg.TARGET.EXTRA_WIDTH)
-                in_enlarged_box_id = points_in_boxes_gpu(this_coors[None], this_boxes[None])[0].long()
+                in_enlarged_box_id = points_in_boxes_gpu(this_coors[None], this_enlarged_boxes[None])[0].long()
                 enlarged_background = in_enlarged_box_id < 0
                 ignored = background ^ enlarged_background
                 this_cls_labels[ignored] = -1
 
-            cls_labels.append(this_cls_labels)
             box_labels.append(this_box_labels)
         cls_labels = torch.cat(cls_labels, dim=0)
         box_labels = torch.cat(box_labels, dim=0)
@@ -73,7 +72,7 @@ class PointSegmentor(torch.nn.Module):
         centerness = boxes.new_zeros(mask.size(0))
 
         boxes = boxes[mask]
-        assert (boxes.sum(dim=-1) != 0).all()
+        assert (boxes.sum(dim=-1) > 0).all()
         canonical_xyz = points[mask, :] - boxes[:, :3]
         rys = boxes[:, -1]
         canonical_xyz = common_utils.rotate_points_along_z(
@@ -87,9 +86,9 @@ class PointSegmentor(torch.nn.Module):
         distance_top = boxes[:, 5] / 2 - canonical_xyz[:, 2]
         distance_bottom = boxes[:, 5] / 2 + canonical_xyz[:, 2]
 
-        centerness_l = torch.min(distance_front, distance_back) / torch.max(distance_front, distance_back)
-        centerness_w = torch.min(distance_left, distance_right) / torch.max(distance_left, distance_right)
-        centerness_h = torch.min(distance_top, distance_bottom) / torch.max(distance_top, distance_bottom)
+        centerness_l = torch.min(distance_front, distance_back) / (torch.max(distance_front, distance_back) + 1e-5)
+        centerness_w = torch.min(distance_left, distance_right) / (torch.max(distance_left, distance_right) + 1e-5)
+        centerness_h = torch.min(distance_top, distance_bottom) / (torch.max(distance_top, distance_bottom) + 1e-5)
         centerness_pos = torch.clamp(centerness_l * centerness_w * centerness_h, min=epsilon) ** (1 / 3.0)
 
         centerness[mask] = centerness_pos
@@ -109,7 +108,7 @@ class PointSegmentor(torch.nn.Module):
         positives = cls_labels > 0
         negatives = cls_labels == 0
         cls_weights = positives * 1.0 + negatives * 1.0
-        cls_weights = cls_weights / torch.clamp(cls_weights.sum().float(), min=1.0)
+        cls_weights /= torch.clamp(positives.sum().float(), min=1.0)
 
         onehot = cls_logits.new_zeros((num_coors, self.num_class + 1))
         onehot[noignores, cls_labels[noignores].long()] = 1.0
@@ -117,10 +116,11 @@ class PointSegmentor(torch.nn.Module):
             centerness = self.generate_centerness_label(coors, box_labels, positives)
             onehot *= centerness.view(-1, 1)
 
-        cls_loss = self.loss_func(cls_logits, onehot[:, 1:], weights=cls_weights)
-        cls_loss = self.model_cfg.LOSS.WEIGHT * cls_loss.sum()  # .mean(dim=-1).sum()
+        cls_loss = self.loss_func(cls_logits, onehot[:, 1:], weights=cls_weights).mean(dim=-1).sum()
+        cls_loss = self.model_cfg.LOSS.WEIGHT * cls_loss
         assert not (torch.isnan(cls_loss).any() or torch.isinf(cls_loss).any())
         assert not (torch.isnan(cls_logits).any() or torch.isinf(cls_logits).any())
+        assert torch.logical_and(cls_labels[noignores] >= 1, cls_labels[noignores] <= self.num_class).all()
 
         if 'LOG_NAME' in self.model_cfg.LOSS:
             tb_dict.update({self.model_cfg.LOSS.LOG_NAME: cls_loss.item()})

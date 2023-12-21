@@ -89,6 +89,7 @@ def launch_experiment(arg, cfg, RUN, logger):
     """ run experiment """
     logger.info(f"CUDA_VISIBLE_DEVICES: {os.environ.get('CUDA_VISIBLE_DEVICES', 'ALL')}")
     logger.info(f"TOTAL_BATCH_SIZE: {accelerator.num_processes * RUN.samples_per_gpu}")
+    logger.info(f"MODEL: \n{model}")
 
     DistributedRunner(
         RUN, hooks=[

@@ -9,6 +9,7 @@ from ...core.base import Register
 VFL = Register('VoxFormerLayer')
 
 
+# TODO: use torch.nn.Flatten instead handcraft
 @VFL.register('ResPointMLP')
 class ResidualPointMLP(torch.nn.Module):
     def __init__(self, model_cfg, input_channel, group_size):
@@ -146,24 +147,80 @@ class PointNet(torch.nn.Module):
         return x
 
 
-@VFL.register('Attention')
-class Attention():
-    pass
+@VFL.register('SelfAttn')
+class Attention(torch.nn.Module):
+    def __init__(self, model_cfg, input_channel, group_size):
+        super().__init__()
+        self.middel_channel = model_cfg.pre[0]
+        self.output_channel = model_cfg.pos[0]
+
+        self.pos_embed = self.build_learned_pos_embedding(3, input_channel)
+        self.self_attn = self.build_self_attention(input_channel, model_cfg.get('heads', 8))
+        self.fc1 = torch.nn.Linear(input_channel, self.middel_channel)
+        self.fc2 = torch.nn.Linear(self.middel_channel, self.output_channel)
+        self.norm1 = torch.nn.LayerNorm(input_channel)
+        self.norm2 = torch.nn.LayerNorm(self.output_channel)
+        self.act = dict(relu=torch.nn.functional.relu,
+                        gelu=torch.nn.functional.gelu,
+                        glu=torch.nn.functional.glu)[model_cfg.act]
+        self.identify = torch.nn.Sequential(
+            torch.nn.Linear(input_channel, self.output_channel, bias=False),
+        ) if input_channel != model_cfg.pos[0] else torch.nn.Identity()
+
+        self.group_size = group_size
+
+    @staticmethod
+    def build_learned_pos_embedding(input_channel, num_pos_feats):
+        # learned position_embedding
+        return build_mlps([num_pos_feats],
+                          in_channels=input_channel,
+                          out_channels=num_pos_feats)
+
+    @staticmethod
+    def build_self_attention(input_channel, num_heads):
+        class SetAttention(torch.nn.Module):
+            def __init__(self):
+                super().__init__()
+                self.self_attn = torch.nn.MultiheadAttention(input_channel, num_heads)
+
+            def forward(self, pe, x):
+                q = x + pe
+                k = x + pe
+                v = x
+                x, w = self.self_attn(q, k, v, need_weights=False)
+                return x
+
+        return SetAttention()
+
+    def group(self, x):
+        return x.view(-1, self.group_size, x.size(-1))
+
+    def flatten(self, x):
+        return x.view(-1, x.size(-1))
+
+    def forward(self, p, x):
+        x = self.norm1(x + self.flatten(self.self_attn(self.group(self.pos_embed(p)),
+                                                       self.group(x))))
+        x = self.norm2(self.identify(x) + self.fc2(self.act(self.fc1(x))))
+        return x
 
 
 class MultiScaleLayer(torch.nn.Module):
-    def __init__(self, network, strides=(4, 16)):
+    def __init__(self, network, strides=(1, 4, 16)):
         super().__init__()
         assert len(strides) > 0
 
         self.network = network
         self.strides = strides
-        self.agg = build_mlps([self.network.output_channel],
-                              (1 + len(strides)) * self.network.output_channel)
+        self.agg = build_mlps(
+            [self.network.output_channel],
+            len(strides) * self.network.output_channel
+        ) if len(strides) > 1 else None
+
         self.group_size = self.network.group_size
         self.output_channel = self.network.output_channel
 
-    def backup_forward(self):
+    def __forward(self):
         x = self.premap(x)
 
         p1 = p
@@ -179,14 +236,17 @@ class MultiScaleLayer(torch.nn.Module):
         return p2, x2, i_from, i_to
 
     def forward(self, p, x):  # (n*g,3) (n*g,c) [(n*g),...,(n*g)]
-        feats = [self.network(p, x)]
+        feats_list = [self.network(p, x)]
         for stride in self.strides:
             assert self.group_size % stride == 0
             self.network.group_size = self.group_size // stride
-            feats.append(self.network(p, x))
+            feats_list.append(self.network(p, x))
             self.network.group_size = self.group_size
 
-        return self.agg(torch.cat(feats, dim=-1))
+        if self.agg is None:
+            return feats_list[0]
+        else:
+            return self.agg(torch.cat(feats_list, dim=-1))
 
 
 def highlight_group(pts, group_id, gs):
@@ -211,12 +271,14 @@ class CurveBackBone(torch.nn.Module):
 
         self.blocks = torch.nn.ModuleList()
 
-        for layer_cfg in self.cfg.BLOCKS:
+        scales = self.cfg.get('MULTI_SCALE_STRIDES', [])
+        for i, layer_cfg in enumerate(self.cfg.BLOCKS):
             layer = VFL.build_from_cfg(layer_cfg,
                                        input_channel=input_channels,
                                        group_size=self.group_size)
-            if self.cfg.get('MULTI_SCALE_STRIDES', ()):
-                layer = MultiScaleLayer(layer, self.cfg.MULTI_SCALE_STRIDES)
+            if scales:
+                scale = scales[i] if isinstance(scales[0], list) else scales
+                layer = MultiScaleLayer(layer, scale)
             self.blocks.append(layer)
             input_channels = layer.output_channel
         self.num_point_features = input_channels
