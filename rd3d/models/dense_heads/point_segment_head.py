@@ -60,10 +60,10 @@ class PointSegmentor(torch.nn.Module):
                 ignored = background ^ enlarged_background
                 this_cls_labels[ignored] = -1
 
+            cls_labels.append(this_cls_labels)
             box_labels.append(this_box_labels)
         cls_labels = torch.cat(cls_labels, dim=0)
         box_labels = torch.cat(box_labels, dim=0)
-
         self.train_dict.update(cls_labels=cls_labels, box_labels=box_labels)
 
     @staticmethod
@@ -72,7 +72,7 @@ class PointSegmentor(torch.nn.Module):
         centerness = boxes.new_zeros(mask.size(0))
 
         boxes = boxes[mask]
-        assert (boxes.sum(dim=-1) > 0).all()
+        assert (boxes.sum(dim=-1) != 0).all()
         canonical_xyz = points[mask, :] - boxes[:, :3]
         rys = boxes[:, -1]
         canonical_xyz = common_utils.rotate_points_along_z(
@@ -120,11 +120,43 @@ class PointSegmentor(torch.nn.Module):
         cls_loss = self.model_cfg.LOSS.WEIGHT * cls_loss
         assert not (torch.isnan(cls_loss).any() or torch.isinf(cls_loss).any())
         assert not (torch.isnan(cls_logits).any() or torch.isinf(cls_logits).any())
-        assert torch.logical_and(cls_labels[noignores] >= 1, cls_labels[noignores] <= self.num_class).all()
+        assert torch.logical_and(cls_labels[noignores] >= 0, cls_labels[noignores] <= self.num_class).all()
+        assert torch.logical_and(cls_labels[positives] >= 1, cls_labels[positives] <= self.num_class).all()
 
         if 'LOG_NAME' in self.model_cfg.LOSS:
-            tb_dict.update({self.model_cfg.LOSS.LOG_NAME: cls_loss.item()})
+            recall1 = self.get_recall(cls_logits, cls_labels)
+            recall2 = self.get_recall(cls_logits, cls_labels, 0.25)
+            tb_dict.update({self.model_cfg.LOSS.LOG_NAME: cls_loss.item(),
+                            self.model_cfg.LOSS.LOG_NAME + '_recall': recall1,
+                            self.model_cfg.LOSS.LOG_NAME + '_recall_threshold': recall2})
         return cls_loss, tb_dict
+
+    def get_recall(self, pred_logits, real_labels, threshold=None):
+        pred_scores = pred_logits.sigmoid().detach().clone()
+        cls_recall_dict = {}
+        if threshold is None:
+            positives = real_labels > 0
+            pred_labels = pred_scores.argmax(dim=-1)
+            pred_labels = pred_labels[positives]
+            real_labels = real_labels[positives]
+            for i in range(self.num_class):
+                name = str(i + 1)
+                pred_true = pred_labels == i
+                real_true = real_labels == (i + 1)
+                intersection = torch.logical_and(pred_true, real_true)
+                recall = torch.div(intersection.sum().float(),
+                                   torch.clip(real_true.sum().float(), min=1))
+                cls_recall_dict.update({name: recall.item()})
+        else:
+            for i in range(self.num_class):
+                name = str(i + 1)
+                pred_true = pred_scores[:, i] > threshold
+                real_true = real_labels == (i + 1)
+                intersection = torch.logical_and(pred_true, real_true)
+                recall = torch.div(intersection.sum().float(),
+                                   torch.clip(real_true.sum().float(), min=1))
+                cls_recall_dict.update({name: recall.item()})
+        return cls_recall_dict
 
     def forward(self, batch_dict):
         numbs = batch_dict['voxel_numbers']

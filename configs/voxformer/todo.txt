@@ -1,5 +1,2 @@
 #TODO
-1. multiscale
 2. multigroup in one block
-3. centerness regularization
-4. enlarge boxes

@@ -1,3 +1,5 @@
+import accelerate
+
 from ..core.base import *
 from ..core import PROJECT_ROOT
 

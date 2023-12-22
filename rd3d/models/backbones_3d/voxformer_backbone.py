@@ -171,7 +171,6 @@ class Attention(torch.nn.Module):
 
     @staticmethod
     def build_learned_pos_embedding(input_channel, num_pos_feats):
-        # learned position_embedding
         return build_mlps([num_pos_feats],
                           in_channels=input_channel,
                           out_channels=num_pos_feats)
@@ -220,21 +219,6 @@ class MultiScaleLayer(torch.nn.Module):
         self.group_size = self.network.group_size
         self.output_channel = self.network.output_channel
 
-    def __forward(self):
-        x = self.premap(x)
-
-        p1 = p
-        e1 = self.group(p1)
-        e1 = self.enpos(self.flatten(e1 - e1.mean(dim=1, keepdim=True)))
-
-        p2 = p1[i_to]
-        e2 = self.group(p2)
-        e2 = self.enpos(self.flatten(e2 - e2.mean(dim=1, keepdim=True)))
-
-        x1 = self.flatten(self.layers(self.group(e1 * x)))  # (kg,c) -> (k,g,c)
-        x2 = self.flatten(self.layers(self.group(e2 * x1[i_to])))
-        return p2, x2, i_from, i_to
-
     def forward(self, p, x):  # (n*g,3) (n*g,c) [(n*g),...,(n*g)]
         feats_list = [self.network(p, x)]
         for stride in self.strides:
@@ -249,18 +233,21 @@ class MultiScaleLayer(torch.nn.Module):
             return self.agg(torch.cat(feats_list, dim=-1))
 
 
-def highlight_group(pts, group_id, gs):
-    import torch
-    from rd3d.utils import viz_utils
-    from matplotlib import pyplot as plt
-    if group_id:
-        c = torch.zeros_like(pts).view(-1, gs, 3).cpu().float()
-        gc = torch.randperm(len(group_id))[:, None].repeat(1, gs).view(-1)
-        gc = torch.tensor(plt.get_cmap('tab20c')(gc / gc.max())[:, :3]).float()
-        c[group_id] = gc.view(-1, gs, 3)
-        viz_utils.viz_scene((pts, c.view(-1, 3)))
-    else:
-        viz_utils.viz_scene(pts)
+class GroupPoolLayer(torch.nn.Module):
+    def __init__(self, stride=2):
+        super().__init__()
+        assert isinstance(stride, int) and stride > 0
+        self.stride = stride
+
+    def pool(self, large_coors, large_feats):
+        small_coors = large_coors
+        small_feats = large_feats
+        return small_coors, small_feats
+
+    def unpool(self, small_coors, small_feats):
+        large_coors = small_coors
+        large_feats = small_feats
+        return large_coors, large_feats
 
 
 class CurveBackBone(torch.nn.Module):
@@ -285,6 +272,20 @@ class CurveBackBone(torch.nn.Module):
         self.grid_size = torch.tensor(grid_size, dtype=torch.int).view(1, 3).cuda()
         self.order = sfc.min_required_order(self.grid_size)
 
+    @staticmethod
+    def highlight_group(pts, group_id, gs):
+        import torch
+        from rd3d.utils import viz_utils
+        from matplotlib import pyplot as plt
+        if group_id:
+            c = torch.zeros_like(pts).view(-1, gs, 3).cpu().float()
+            gc = torch.randperm(len(group_id))[:, None].repeat(1, gs).view(-1)
+            gc = torch.tensor(plt.get_cmap('tab20c')(gc / gc.max())[:, :3]).float()
+            c[group_id] = gc.view(-1, gs, 3)
+            viz_utils.viz_scene((pts, c.view(-1, 3)))
+        else:
+            viz_utils.viz_scene(pts)
+
     def mapping(self, vox_numbs, vox_coors):
         vox_coors1 = vox_coors  # (m,4)
         if self.cfg.MULTI_GROUP == 'reverse_coors':
@@ -307,7 +308,6 @@ class CurveBackBone(torch.nn.Module):
         vox_coors = batch_dict['voxel_coords']
         vox_feats = batch_dict['voxel_features']
         pts_coors = batch_dict['point_coords']
-
         (ind1, _, ind12, ind21), vox_numbs = self.mapping(vox_numbs, vox_coors)
         ind_list = [ind1] + [ind12, ind21] * (len(self.blocks) // 2)
 
@@ -316,7 +316,7 @@ class CurveBackBone(torch.nn.Module):
             pts_coors = pts_coors[ind]
             vox_coors = vox_coors[ind]
             vox_feats = block(pts_coors, vox_feats)
-            # highlight_group(pts_coors.split(vox_numbs.tolist(), dim=0)[3], [0], self.group_size)
+            # self.highlight_group(pts_coors.split(vox_numbs.tolist(), dim=0)[3], [0], self.group_size)
 
         batch_dict.update({
             'voxel_numbers': vox_numbs,
